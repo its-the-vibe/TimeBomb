@@ -1,6 +1,6 @@
 module github.com/its-the-vibe/TimeBomb
 
-go 1.24.11
+go 1.25.5
 
 require (
 	github.com/redis/go-redis/v9 v9.17.2
