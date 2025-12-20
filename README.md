@@ -69,17 +69,48 @@ ZADD delays 1766268151 '{"channel":"C0A43V03EBV","ts":"1766268151.996789"}'
 
 ## Running Locally
 
-### Using Go
+### Quick Start with Makefile
 
-1. Set environment variables:
+The project includes a Makefile for common operations:
+
 ```bash
-export SLACK_BOT_TOKEN=xoxb-your-token-here
-export REDIS_ADDR=localhost:6379
+# Show available commands
+make help
+
+# Build the binary
+make build
+
+# Run locally
+make run
+
+# Run linters
+make lint
+
+# Build Docker image
+make docker-build
+
+# Run with Docker Compose
+make docker-run
 ```
 
-2. Run the service:
+### Using Go
+
+1. Copy the example environment file:
+```bash
+cp .env.example .env
+```
+
+2. Edit `.env` and set your configuration:
+```bash
+SLACK_BOT_TOKEN=xoxb-your-token-here
+REDIS_ADDR=localhost:6379
+```
+
+3. Run the service:
 ```bash
 go run main.go
+# or
+make run
 ```
 
 ### Using Docker
