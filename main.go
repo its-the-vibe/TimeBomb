@@ -149,7 +149,18 @@ func (s *TimeBombService) processExpiredMessages(ctx context.Context) error {
 	log.Printf("Found %d expired message(s)", len(results))
 
 	for _, result := range results {
-		if err := s.processMessage(ctx, result.Member.(string)); err != nil {
+		// Safe type assertion
+		member, ok := result.Member.(string)
+		if !ok {
+			log.Printf("Error: invalid member type in sorted set, expected string but got %T", result.Member)
+			// Remove invalid entry from Redis
+			if err := s.redis.ZRem(ctx, s.config.RedisSortedSet, result.Member).Err(); err != nil {
+				log.Printf("Error removing invalid entry from redis: %v", err)
+			}
+			continue
+		}
+
+		if err := s.processMessage(ctx, member); err != nil {
 			log.Printf("Error processing message: %v", err)
 			continue
 		}
@@ -161,6 +172,11 @@ func (s *TimeBombService) processExpiredMessages(ctx context.Context) error {
 func (s *TimeBombService) processMessage(ctx context.Context, payload string) error {
 	var msg Message
 	if err := json.Unmarshal([]byte(payload), &msg); err != nil {
+		log.Printf("Failed to unmarshal message, removing from queue: %v", err)
+		// Invalid JSON - remove from Redis so it doesn't get retried
+		if removeErr := s.redis.ZRem(ctx, s.config.RedisSortedSet, payload).Err(); removeErr != nil {
+			log.Printf("Error removing invalid message from redis: %v", removeErr)
+		}
 		return fmt.Errorf("failed to unmarshal message: %w", err)
 	}
 
@@ -169,7 +185,18 @@ func (s *TimeBombService) processMessage(ctx context.Context, payload string) er
 	// Delete the message from Slack
 	_, _, err := s.slack.DeleteMessageContext(ctx, msg.Channel, msg.TS)
 	if err != nil {
-		return fmt.Errorf("failed to delete slack message: %w", err)
+		// Check if it's a permanent error (message not found, channel not found, etc.)
+		slackErr, ok := err.(slack.SlackErrorResponse)
+		if ok && (slackErr.Err == "message_not_found" || slackErr.Err == "channel_not_found" || slackErr.Err == "not_in_channel") {
+			// Permanent error - remove from Redis
+			log.Printf("Message cannot be deleted (permanent error: %s), removing from queue", slackErr.Err)
+			if removeErr := s.redis.ZRem(ctx, s.config.RedisSortedSet, payload).Err(); removeErr != nil {
+				log.Printf("Error removing message from redis: %v", removeErr)
+			}
+			return fmt.Errorf("permanent error deleting slack message: %w", err)
+		}
+		// Transient error - leave in Redis for retry
+		return fmt.Errorf("failed to delete slack message (will retry): %w", err)
 	}
 
 	log.Printf("Successfully deleted message from channel %s with ts %s", msg.Channel, msg.TS)
