@@ -1,0 +1,18 @@
+services:
+  timebomb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # Redis configuration
+      - REDIS_ADDR=${REDIS_ADDR:-localhost:6379}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_DB=${REDIS_DB:-0}
+      - REDIS_SORTED_SET=${REDIS_SORTED_SET:-delays}
+      
+      # Slack configuration
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
+      
+      # Service configuration
+      - POLL_INTERVAL=${POLL_INTERVAL:-10s}
+    restart: unless-stopped

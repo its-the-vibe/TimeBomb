@@ -1,0 +1,53 @@
+---
+# Configuration for GitHub Copilot Coding Agent
+# Based on best practices from https://gh.io/copilot-coding-agent-tips
+
+# Build and test commands
+build:
+  command: "go build -o timebomb ."
+  description: "Build the TimeBomb service binary"
+
+test:
+  command: "go test ./... -v"
+  description: "Run all tests"
+
+lint:
+  command: "go vet ./... && go fmt ./..."
+  description: "Run linter and formatter"
+
+# Project conventions
+conventions:
+  - Go modules are used for dependency management (no vendoring)
+  - Follow standard Go formatting (gofmt)
+  - Use environment variables for configuration
+  - Log important events and errors
+  - Implement graceful shutdown for services
+
+# Important files
+important_files:
+  - path: "main.go"
+    description: "Main service implementation with Redis polling and Slack API integration"
+  - path: "Dockerfile"
+    description: "Multi-stage Docker build using 'from scratch' runtime"
+  - path: "docker-compose.yml"
+    description: "Docker Compose configuration for running the service"
+  - path: "README.md"
+    description: "Comprehensive documentation with configuration instructions"
+
+# Environment setup
+environment:
+  required_env_vars:
+    - SLACK_BOT_TOKEN
+  optional_env_vars:
+    - REDIS_ADDR
+    - REDIS_PASSWORD
+    - REDIS_DB
+    - REDIS_SORTED_SET
+    - POLL_INTERVAL
+
+# Dependencies
+dependencies:
+  - name: "github.com/redis/go-redis/v9"
+    purpose: "Redis client for polling sorted sets"
+  - name: "github.com/slack-go/slack"
+    purpose: "Slack API client for deleting messages"
