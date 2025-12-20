@@ -1,0 +1,27 @@
+# Git files
+.git
+.gitignore
+
+# Documentation
+README.md
+.env.example
+
+# Binary
+timebomb
+
+# Environment files (could contain secrets)
+.env
+
+# IDE and editor files
+.vscode
+.idea
+*.swp
+*.swo
+
+# Test artifacts
+*.test
+coverage.*
+*.coverprofile
+
+# Other
+.copilot.yaml

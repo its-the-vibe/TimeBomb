@@ -1,0 +1,21 @@
+services:
+  timebomb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    read_only: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # Redis configuration
+      - REDIS_ADDR=${REDIS_ADDR:-host.docker.internal:6379}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_DB=${REDIS_DB:-0}
+      - REDIS_SORTED_SET=${REDIS_SORTED_SET:-timebomb:delays}
+      
+      # Slack configuration
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
+      
+      # Service configuration
+      - POLL_INTERVAL=${POLL_INTERVAL:-1s}
+    restart: unless-stopped
