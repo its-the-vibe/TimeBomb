@@ -37,6 +37,7 @@ The service is configured using environment variables:
 - `REDIS_DB`: Redis database number (default: `0`)
 - `REDIS_SORTED_SET`: Name of the sorted set containing messages (default: `delays`)
 - `POLL_INTERVAL`: How often to poll for expired messages (default: `10s`)
+- `LOG_LEVEL`: Logging level - `debug`, `info`, `warn`, or `error` (default: `info`)
 
 ## Message Format
 
@@ -52,6 +53,27 @@ Messages in the Redis sorted set should be JSON objects with the following struc
 Where:
 - `channel`: Slack channel ID
 - `ts`: Slack message timestamp
+
+## Logging
+
+The service uses structured logging with configurable log levels via the `LOG_LEVEL` environment variable.
+
+### Log Levels
+
+- `debug`: Detailed information for debugging (includes "No expired messages found", Redis operations)
+- `info`: General informational messages (service start/stop, message processing)
+- `warn`: Warning messages (invalid messages, permanent Slack errors)
+- `error`: Error messages (Redis failures, critical errors)
+
+### Example
+
+```bash
+# Run with debug logging to see all messages
+LOG_LEVEL=debug go run main.go
+
+# Run with error logging to only see critical issues
+LOG_LEVEL=error go run main.go
+```
 
 ## Adding Messages to Redis
 
