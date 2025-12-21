@@ -405,6 +405,13 @@ func (s *TimeBombService) processMessage(ctx context.Context, payload string) er
 		}
 	}
 
+	// Asynchronously wait and delete message to avoid blocking the processing loop
+	go s.deleteMessageAfterDelay(ctx, msg, payload)
+
+	return nil
+}
+
+func (s *TimeBombService) deleteMessageAfterDelay(ctx context.Context, msg Message, payload string) {
 	// Wait 1 second before deleting (with context awareness for graceful shutdown)
 	timer := time.NewTimer(1 * time.Second)
 	select {
@@ -413,13 +420,13 @@ func (s *TimeBombService) processMessage(ctx context.Context, payload string) er
 	case <-ctx.Done():
 		timer.Stop()
 		s.logger.Info("Context cancelled during wait, skipping message deletion", "channel", msg.Channel, "ts", msg.TS)
-		return ctx.Err()
+		return
 	}
 
 	s.logger.Info("Deleting message", "channel", msg.Channel, "ts", msg.TS)
 
 	// Delete the message from Slack
-	_, _, err = s.slack.DeleteMessageContext(ctx, msg.Channel, msg.TS)
+	_, _, err := s.slack.DeleteMessageContext(ctx, msg.Channel, msg.TS)
 	if err != nil {
 		// Check if it's a permanent error (message not found, channel not found, etc.)
 		slackErr, ok := err.(slack.SlackErrorResponse)
@@ -430,22 +437,22 @@ func (s *TimeBombService) processMessage(ctx context.Context, payload string) er
 			if removeErr := s.redis.ZRem(ctx, s.config.RedisSortedSet, payload).Err(); removeErr != nil {
 				s.logger.Error("Error removing message from redis", "error", removeErr)
 			}
-			return fmt.Errorf("permanent error deleting slack message: %w", err)
+			return
 		}
 		// Transient error - leave in Redis for retry
-		return fmt.Errorf("failed to delete slack message (will retry): %w", err)
+		s.logger.Error("Failed to delete slack message (will retry)", "error", err)
+		return
 	}
 
 	s.logger.Info("Successfully deleted message", "channel", msg.Channel, "ts", msg.TS)
 
 	// Remove the message from Redis
 	if err := s.redis.ZRem(ctx, s.config.RedisSortedSet, payload).Err(); err != nil {
-		return fmt.Errorf("failed to remove message from redis: %w", err)
+		s.logger.Error("Failed to remove message from redis", "error", err)
+		return
 	}
 
 	s.logger.Debug("Removed message from Redis sorted set")
-
-	return nil
 }
 
 func (s *TimeBombService) Close() error {
