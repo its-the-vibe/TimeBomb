@@ -75,7 +75,7 @@ func loadConfig() (*Config, error) {
 		RedisDB:           redisDB,
 		RedisSortedSet:    getEnv("REDIS_SORTED_SET", "delays"),
 		RedisChannel:      getEnv("REDIS_CHANNEL", "timebomb-messages"),
-		RedisReactionList: getEnv("REDIS_REACTION_LIST", "slack-reactions"),
+		RedisReactionList: getEnv("REDIS_REACTION_LIST", "slack_reactions"),
 		SlackBotToken:     getEnv("SLACK_BOT_TOKEN", ""),
 		PollInterval:      pollInterval,
 		LogLevel:          logLevel,
