@@ -258,6 +258,16 @@ func (s *TimeBombService) handleIncomingMessage(ctx context.Context, payload str
 		return fmt.Errorf("failed to unmarshal TimeBombMessage: %w", err)
 	}
 
+	// Validate required fields
+	if tbMsg.Channel == "" {
+		s.logger.Warn("Missing required field: channel")
+		return fmt.Errorf("channel field is required")
+	}
+	if tbMsg.TS == "" {
+		s.logger.Warn("Missing required field: ts")
+		return fmt.Errorf("ts field is required")
+	}
+
 	// Validate TTL
 	if tbMsg.TTL <= 0 {
 		s.logger.Warn("Invalid TTL value (must be positive)", "ttl", tbMsg.TTL)
@@ -275,8 +285,9 @@ func (s *TimeBombService) handleIncomingMessage(ctx context.Context, payload str
 		"ts", tbMsg.TS,
 		"ttl", tbMsg.TTL)
 
-	// Calculate expiration timestamp
-	expirationTime := time.Now().Unix() + int64(tbMsg.TTL)
+	// Calculate expiration timestamp using time.Add to avoid overflow
+	now := time.Now()
+	expirationTime := now.Add(time.Duration(tbMsg.TTL) * time.Second).Unix()
 
 	// Create internal message format for sorted set
 	internalMsg := Message{
