@@ -79,6 +79,13 @@ func parseLogLevel(level string) slog.Level {
 	}
 }
 
+func createLogger(level slog.Level) *slog.Logger {
+	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: level,
+	})
+	return slog.New(handler)
+}
+
 type TimeBombService struct {
 	redis  *redis.Client
 	slack  *slack.Client
@@ -96,10 +103,7 @@ func NewTimeBombService(config *Config) *TimeBombService {
 	slackClient := slack.New(config.SlackBotToken)
 
 	// Create logger with configured level
-	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: config.LogLevel,
-	})
-	logger := slog.New(handler)
+	logger := createLogger(config.LogLevel)
 
 	return &TimeBombService{
 		redis:  redisClient,
@@ -251,14 +255,20 @@ func (s *TimeBombService) Close() error {
 }
 
 func main() {
+	// Create default logger for early error reporting
+	logger := createLogger(slog.LevelInfo)
+
 	config, err := loadConfig()
 	if err != nil {
-		slog.Error("Failed to load configuration", "error", err)
+		logger.Error("Failed to load configuration", "error", err)
 		os.Exit(1)
 	}
 
+	// Update logger with configured level
+	logger = createLogger(config.LogLevel)
+
 	if config.SlackBotToken == "" {
-		slog.Error("SLACK_BOT_TOKEN environment variable is required")
+		logger.Error("SLACK_BOT_TOKEN environment variable is required")
 		os.Exit(1)
 	}
 
