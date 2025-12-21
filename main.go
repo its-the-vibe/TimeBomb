@@ -391,9 +391,9 @@ func (s *TimeBombService) processMessage(ctx context.Context, payload string) er
 		return fmt.Errorf("failed to remove message from redis: %w", err)
 	}
 
-	// Post bang reaction to Redis list for SlackLiner
+	// Post boom reaction to Redis list for SlackLiner
 	reactionMsg := ReactionMessage{
-		Reaction: "bang",
+		Reaction: "boom",
 		Channel:  msg.Channel,
 		TS:       msg.TS,
 	}
@@ -407,7 +407,7 @@ func (s *TimeBombService) processMessage(ctx context.Context, payload string) er
 			s.logger.Error("Failed to push reaction to Redis list", "error", err)
 			// Continue with deletion even if reaction fails
 		} else {
-			s.logger.Info("Posted bang reaction", "channel", msg.Channel, "ts", msg.TS)
+			s.logger.Info("Posted boom reaction", "channel", msg.Channel, "ts", msg.TS)
 		}
 	}
 
