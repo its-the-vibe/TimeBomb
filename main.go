@@ -18,6 +18,8 @@ import (
 
 const (
 	// MaxTTL is the maximum allowed TTL in seconds (~68 years)
+	// Using math.MaxInt32 ensures no overflow when converting to time.Duration
+	// (time.Duration max is ~292 years, so 68 years is well within limits)
 	MaxTTL = 2147483647 // math.MaxInt32
 )
 
