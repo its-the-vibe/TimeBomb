@@ -4,10 +4,12 @@ Service which polls for expired slack messages and deletes them.
 
 ## Overview
 
-TimeBomb is a Go service that monitors a Redis sorted set for expired Slack messages and automatically deletes them using the Slack API. Messages are stored in Redis with their expiration timestamps, and this service polls the sorted set at regular intervals to find and delete expired messages.
+TimeBomb is a Go service that subscribes to a Redis Pub/Sub channel to receive message scheduling requests, stores them in an internal Redis sorted set, and automatically deletes expired Slack messages using the Slack API. External services interact with TimeBomb by publishing messages to the Redis channel, and TimeBomb polls its internal sorted set at regular intervals to find and delete expired messages.
 
 ## Features
 
+- Subscribes to Redis Pub/Sub channel for incoming message scheduling requests
+- Maintains an internal Redis sorted set for tracking message expiration
 - Polls Redis sorted set for expired messages
 - Deletes messages from Slack channels using the Slack API
 - Configurable via environment variables
@@ -36,23 +38,28 @@ The service is configured using environment variables:
 - `REDIS_PASSWORD`: Redis password (default: empty)
 - `REDIS_DB`: Redis database number (default: `0`)
 - `REDIS_SORTED_SET`: Name of the sorted set containing messages (default: `delays`)
+- `REDIS_CHANNEL`: Redis Pub/Sub channel for incoming messages (default: `timebomb-messages`)
 - `POLL_INTERVAL`: How often to poll for expired messages (default: `10s`)
 - `LOG_LEVEL`: Logging level - `debug`, `info`, `warn`, or `error` (default: `info`)
 
 ## Message Format
 
-Messages in the Redis sorted set should be JSON objects with the following structure:
+External services should publish messages to the Redis Pub/Sub channel in the following JSON format:
 
 ```json
 {
   "channel": "C0A43V03EBV",
-  "ts": "1766268151.996789"
+  "ts": "1766268151.996789",
+  "ttl": 3600
 }
 ```
 
 Where:
 - `channel`: Slack channel ID
 - `ts`: Slack message timestamp
+- `ttl`: Time-to-live in seconds (how long until the message should be deleted)
+
+The service will receive these messages, calculate the expiration time, and store them in an internal sorted set for processing.
 
 ## Logging
 
@@ -75,18 +82,21 @@ LOG_LEVEL=debug go run main.go
 LOG_LEVEL=error go run main.go
 ```
 
-## Adding Messages to Redis
+## Publishing Messages to TimeBomb
 
-Messages are added to the sorted set using the `ZADD` command, where the score is the expiration timestamp:
+To schedule a message for deletion, publish a JSON message to the Redis Pub/Sub channel:
 
 ```bash
-ZADD delays <expire_timestamp> '{"channel":"C0A43V03EBV","ts":"1766268151.996789"}'
+redis-cli PUBLISH timebomb-messages '{"channel":"C0A43V03EBV","ts":"1766268151.996789","ttl":3600}'
 ```
 
 Example:
 ```bash
-# Message expires at Unix timestamp 1766268151
-ZADD delays 1766268151 '{"channel":"C0A43V03EBV","ts":"1766268151.996789"}'
+# Delete message after 1 hour (3600 seconds)
+redis-cli PUBLISH timebomb-messages '{"channel":"C0A43V03EBV","ts":"1766268151.996789","ttl":3600}'
+
+# Delete message after 30 seconds
+redis-cli PUBLISH timebomb-messages '{"channel":"C0A43V03EBV","ts":"1766268151.996789","ttl":30}'
 ```
 
 ## Running Locally
@@ -177,13 +187,18 @@ docker-compose down
 ## How It Works
 
 1. The service connects to Redis and Slack on startup
-2. Every `POLL_INTERVAL`, it queries the Redis sorted set for messages with scores between 0 and the current Unix timestamp
-3. For each expired message:
+2. It subscribes to the configured Redis Pub/Sub channel (default: `timebomb-messages`)
+3. When a message is published to the channel:
+   - The service receives the message with channel ID, timestamp, and TTL
+   - It calculates the expiration time (current time + TTL)
+   - It stores the message in an internal Redis sorted set with the expiration time as the score
+4. Every `POLL_INTERVAL`, the service queries the internal Redis sorted set for messages with scores between 0 and the current Unix timestamp
+5. For each expired message:
    - The message is parsed from JSON
    - The message is deleted from Slack using the API
    - The message is removed from the Redis sorted set
-4. The service continues polling until it receives a shutdown signal (SIGINT or SIGTERM)
-5. On shutdown, the service gracefully closes connections and exits
+6. The service continues listening for new messages and polling until it receives a shutdown signal (SIGINT or SIGTERM)
+7. On shutdown, the service gracefully closes connections and exits
 
 ## Slack Bot Permissions
 
@@ -202,12 +217,11 @@ go build -o timebomb .
 
 ### Testing the Service
 
-You can test the service by adding a test message to Redis that expires soon:
+You can test the service by publishing a test message to Redis that expires soon:
 
 ```bash
-# Add a message that expires in 30 seconds
-EXPIRE_TIME=$(($(date +%s) + 30))
-redis-cli ZADD delays $EXPIRE_TIME '{"channel":"YOUR_CHANNEL_ID","ts":"YOUR_MESSAGE_TS"}'
+# Publish a message that will be deleted in 30 seconds
+redis-cli PUBLISH timebomb-messages '{"channel":"YOUR_CHANNEL_ID","ts":"YOUR_MESSAGE_TS","ttl":30}'
 ```
 
 ## Graceful Shutdown
