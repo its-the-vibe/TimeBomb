@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,6 +30,7 @@ type Config struct {
 	RedisSortedSet string
 	SlackBotToken  string
 	PollInterval   time.Duration
+	LogLevel       slog.Level
 }
 
 func loadConfig() (*Config, error) {
@@ -42,6 +44,8 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("invalid REDIS_DB: %w", err)
 	}
 
+	logLevel := parseLogLevel(getEnv("LOG_LEVEL", "info"))
+
 	return &Config{
 		RedisAddr:      getEnv("REDIS_ADDR", "localhost:6379"),
 		RedisPassword:  getEnv("REDIS_PASSWORD", ""),
@@ -49,6 +53,7 @@ func loadConfig() (*Config, error) {
 		RedisSortedSet: getEnv("REDIS_SORTED_SET", "delays"),
 		SlackBotToken:  getEnv("SLACK_BOT_TOKEN", ""),
 		PollInterval:   pollInterval,
+		LogLevel:       logLevel,
 	}, nil
 }
 
@@ -59,10 +64,26 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
+func parseLogLevel(level string) slog.Level {
+	switch strings.ToLower(level) {
+	case "debug":
+		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
 type TimeBombService struct {
 	redis  *redis.Client
 	slack  *slack.Client
 	config *Config
+	logger *slog.Logger
 }
 
 func NewTimeBombService(config *Config) *TimeBombService {
@@ -74,10 +95,17 @@ func NewTimeBombService(config *Config) *TimeBombService {
 
 	slackClient := slack.New(config.SlackBotToken)
 
+	// Create logger with configured level
+	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: config.LogLevel,
+	})
+	logger := slog.New(handler)
+
 	return &TimeBombService{
 		redis:  redisClient,
 		slack:  slackClient,
 		config: config,
+		logger: logger,
 	}
 }
 
@@ -87,26 +115,27 @@ func (s *TimeBombService) Start(ctx context.Context) error {
 		return fmt.Errorf("connection test failed: %w", err)
 	}
 
-	log.Println("TimeBomb service started successfully")
-	log.Printf("Polling interval: %v", s.config.PollInterval)
-	log.Printf("Redis sorted set: %s", s.config.RedisSortedSet)
+	s.logger.Info("TimeBomb service started successfully")
+	s.logger.Info("Configuration",
+		"poll_interval", s.config.PollInterval,
+		"redis_sorted_set", s.config.RedisSortedSet)
 
 	ticker := time.NewTicker(s.config.PollInterval)
 	defer ticker.Stop()
 
 	// Run immediately on start
 	if err := s.processExpiredMessages(ctx); err != nil {
-		log.Printf("Error processing expired messages: %v", err)
+		s.logger.Error("Error processing expired messages", "error", err)
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("Shutting down TimeBomb service...")
+			s.logger.Info("Shutting down TimeBomb service...")
 			return ctx.Err()
 		case <-ticker.C:
 			if err := s.processExpiredMessages(ctx); err != nil {
-				log.Printf("Error processing expired messages: %v", err)
+				s.logger.Error("Error processing expired messages", "error", err)
 			}
 		}
 	}
@@ -117,13 +146,13 @@ func (s *TimeBombService) testConnections(ctx context.Context) error {
 	if err := s.redis.Ping(ctx).Err(); err != nil {
 		return fmt.Errorf("redis connection failed: %w", err)
 	}
-	log.Println("Redis connection successful")
+	s.logger.Info("Redis connection successful")
 
 	// Test Slack connection
 	if _, err := s.slack.AuthTestContext(ctx); err != nil {
 		return fmt.Errorf("slack authentication failed: %w", err)
 	}
-	log.Println("Slack authentication successful")
+	s.logger.Info("Slack authentication successful")
 
 	return nil
 }
@@ -142,26 +171,28 @@ func (s *TimeBombService) processExpiredMessages(ctx context.Context) error {
 	}
 
 	if len(results) == 0 {
-		log.Printf("No expired messages found")
+		s.logger.Debug("No expired messages found")
 		return nil
 	}
 
-	log.Printf("Found %d expired message(s)", len(results))
+	s.logger.Info("Found expired messages", "count", len(results))
 
 	for _, result := range results {
 		// Safe type assertion
 		member, ok := result.Member.(string)
 		if !ok {
-			log.Printf("Error: invalid member type in sorted set, expected string but got %T", result.Member)
+			s.logger.Error("Invalid member type in sorted set",
+				"expected", "string",
+				"got", fmt.Sprintf("%T", result.Member))
 			// Remove invalid entry from Redis
 			if err := s.redis.ZRem(ctx, s.config.RedisSortedSet, result.Member).Err(); err != nil {
-				log.Printf("Error removing invalid entry from redis: %v", err)
+				s.logger.Error("Error removing invalid entry from redis", "error", err)
 			}
 			continue
 		}
 
 		if err := s.processMessage(ctx, member); err != nil {
-			log.Printf("Error processing message: %v", err)
+			s.logger.Error("Error processing message", "error", err)
 			continue
 		}
 	}
@@ -172,15 +203,15 @@ func (s *TimeBombService) processExpiredMessages(ctx context.Context) error {
 func (s *TimeBombService) processMessage(ctx context.Context, payload string) error {
 	var msg Message
 	if err := json.Unmarshal([]byte(payload), &msg); err != nil {
-		log.Printf("Failed to unmarshal message, removing from queue: %v", err)
+		s.logger.Warn("Failed to unmarshal message, removing from queue", "error", err)
 		// Invalid JSON - remove from Redis so it doesn't get retried
 		if removeErr := s.redis.ZRem(ctx, s.config.RedisSortedSet, payload).Err(); removeErr != nil {
-			log.Printf("Error removing invalid message from redis: %v", removeErr)
+			s.logger.Error("Error removing invalid message from redis", "error", removeErr)
 		}
 		return fmt.Errorf("failed to unmarshal message: %w", err)
 	}
 
-	log.Printf("Deleting message from channel %s with ts %s", msg.Channel, msg.TS)
+	s.logger.Info("Deleting message", "channel", msg.Channel, "ts", msg.TS)
 
 	// Delete the message from Slack
 	_, _, err := s.slack.DeleteMessageContext(ctx, msg.Channel, msg.TS)
@@ -189,9 +220,10 @@ func (s *TimeBombService) processMessage(ctx context.Context, payload string) er
 		slackErr, ok := err.(slack.SlackErrorResponse)
 		if ok && (slackErr.Err == "message_not_found" || slackErr.Err == "channel_not_found" || slackErr.Err == "not_in_channel") {
 			// Permanent error - remove from Redis
-			log.Printf("Message cannot be deleted (permanent error: %s), removing from queue", slackErr.Err)
+			s.logger.Warn("Message cannot be deleted (permanent error), removing from queue",
+				"error", slackErr.Err)
 			if removeErr := s.redis.ZRem(ctx, s.config.RedisSortedSet, payload).Err(); removeErr != nil {
-				log.Printf("Error removing message from redis: %v", removeErr)
+				s.logger.Error("Error removing message from redis", "error", removeErr)
 			}
 			return fmt.Errorf("permanent error deleting slack message: %w", err)
 		}
@@ -199,14 +231,14 @@ func (s *TimeBombService) processMessage(ctx context.Context, payload string) er
 		return fmt.Errorf("failed to delete slack message (will retry): %w", err)
 	}
 
-	log.Printf("Successfully deleted message from channel %s with ts %s", msg.Channel, msg.TS)
+	s.logger.Info("Successfully deleted message", "channel", msg.Channel, "ts", msg.TS)
 
 	// Remove the message from Redis
 	if err := s.redis.ZRem(ctx, s.config.RedisSortedSet, payload).Err(); err != nil {
 		return fmt.Errorf("failed to remove message from redis: %w", err)
 	}
 
-	log.Printf("Removed message from Redis sorted set")
+	s.logger.Debug("Removed message from Redis sorted set")
 
 	return nil
 }
@@ -221,11 +253,13 @@ func (s *TimeBombService) Close() error {
 func main() {
 	config, err := loadConfig()
 	if err != nil {
-		log.Fatalf("Failed to load configuration: %v", err)
+		slog.Error("Failed to load configuration", "error", err)
+		os.Exit(1)
 	}
 
 	if config.SlackBotToken == "" {
-		log.Fatal("SLACK_BOT_TOKEN environment variable is required")
+		slog.Error("SLACK_BOT_TOKEN environment variable is required")
+		os.Exit(1)
 	}
 
 	service := NewTimeBombService(config)
@@ -248,15 +282,16 @@ func main() {
 	// Wait for shutdown signal or error
 	select {
 	case sig := <-sigChan:
-		log.Printf("Received signal: %v", sig)
+		service.logger.Info("Received signal", "signal", sig)
 		cancel()
 		// Give the service time to clean up
 		time.Sleep(1 * time.Second)
 	case err := <-errChan:
 		if err != nil && err != context.Canceled {
-			log.Fatalf("Service error: %v", err)
+			service.logger.Error("Service error", "error", err)
+			os.Exit(1)
 		}
 	}
 
-	log.Println("TimeBomb service stopped")
+	service.logger.Info("TimeBomb service stopped")
 }
