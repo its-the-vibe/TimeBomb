@@ -16,6 +16,11 @@ import (
 	"github.com/slack-go/slack"
 )
 
+const (
+	// MaxTTL is the maximum allowed TTL in seconds (~68 years)
+	MaxTTL = 2147483647 // math.MaxInt32
+)
+
 // Message represents the structure of a message in Redis sorted set (internal use)
 type Message struct {
 	Channel string `json:"channel"`
@@ -175,19 +180,22 @@ func (s *TimeBombService) testConnections(ctx context.Context) error {
 }
 
 func (s *TimeBombService) subscribeToChannel(ctx context.Context) {
-	// Retry configuration
-	const maxRetries = 5
 	retryDelay := 5 * time.Second
+	const maxRetryDelay = 60 * time.Second
 
-	for attempt := 1; attempt <= maxRetries; attempt++ {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
 		pubsub := s.redis.Subscribe(ctx, s.config.RedisChannel)
 
-		s.logger.Info("Subscribed to Redis channel", "channel", s.config.RedisChannel, "attempt", attempt)
+		s.logger.Info("Attempting to subscribe to Redis channel", "channel", s.config.RedisChannel)
 
 		// Wait for confirmation that subscription is created
 		_, err := pubsub.Receive(ctx)
 		if err != nil {
-			s.logger.Error("Error receiving subscription confirmation", "error", err, "attempt", attempt)
+			s.logger.Error("Error receiving subscription confirmation", "error", err)
 			pubsub.Close()
 
 			// Check if context is done
@@ -195,32 +203,39 @@ func (s *TimeBombService) subscribeToChannel(ctx context.Context) {
 				return
 			}
 
-			// Retry with exponential backoff
-			if attempt < maxRetries {
-				s.logger.Info("Retrying subscription", "after", retryDelay)
-				time.Sleep(retryDelay)
-				retryDelay *= 2
-				continue
+			// Retry with exponential backoff (capped at maxRetryDelay)
+			s.logger.Info("Retrying subscription", "after", retryDelay)
+			time.Sleep(retryDelay)
+			retryDelay *= 2
+			if retryDelay > maxRetryDelay {
+				retryDelay = maxRetryDelay
 			}
-
-			// Max retries exhausted
-			s.logger.Error("Failed to subscribe after maximum retries - Pub/Sub functionality disabled", "max_retries", maxRetries)
-			return
+			continue
 		}
 
 		// Successfully subscribed, start processing messages
 		s.logger.Info("Successfully subscribed to Redis channel", "channel", s.config.RedisChannel)
+		// Reset retry delay after successful connection
+		retryDelay = 5 * time.Second
 
 		// Get the channel for receiving messages
 		ch := pubsub.Channel()
 
-		for {
+		// Process messages until context is done or channel closes
+		channelClosed := false
+		for !channelClosed {
 			select {
 			case <-ctx.Done():
 				s.logger.Info("Stopping Redis channel subscription")
 				pubsub.Close()
 				return
-			case msg := <-ch:
+			case msg, ok := <-ch:
+				if !ok {
+					// Channel closed - connection lost
+					s.logger.Warn("Redis Pub/Sub channel closed unexpectedly, will attempt to reconnect")
+					channelClosed = true
+					break
+				}
 				if msg == nil {
 					s.logger.Warn("Received nil message from channel")
 					continue
@@ -230,6 +245,9 @@ func (s *TimeBombService) subscribeToChannel(ctx context.Context) {
 				}
 			}
 		}
+
+		// Close pubsub and retry connection
+		pubsub.Close()
 	}
 }
 
@@ -247,9 +265,9 @@ func (s *TimeBombService) handleIncomingMessage(ctx context.Context, payload str
 	}
 
 	// Prevent integer overflow - max TTL is ~68 years in seconds
-	if tbMsg.TTL > 2147483647 {
+	if tbMsg.TTL > MaxTTL {
 		s.logger.Warn("TTL value too large", "ttl", tbMsg.TTL)
-		return fmt.Errorf("TTL too large, max is 2147483647 seconds")
+		return fmt.Errorf("TTL too large, max is %d seconds", MaxTTL)
 	}
 
 	s.logger.Info("Received message from channel",
