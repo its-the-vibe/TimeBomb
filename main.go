@@ -175,33 +175,59 @@ func (s *TimeBombService) testConnections(ctx context.Context) error {
 }
 
 func (s *TimeBombService) subscribeToChannel(ctx context.Context) {
-	pubsub := s.redis.Subscribe(ctx, s.config.RedisChannel)
-	defer pubsub.Close()
+	// Retry configuration
+	const maxRetries = 5
+	retryDelay := 5 * time.Second
 
-	s.logger.Info("Subscribed to Redis channel", "channel", s.config.RedisChannel)
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		pubsub := s.redis.Subscribe(ctx, s.config.RedisChannel)
 
-	// Wait for confirmation that subscription is created
-	_, err := pubsub.Receive(ctx)
-	if err != nil {
-		s.logger.Error("Error receiving subscription confirmation", "error", err)
-		return
-	}
+		s.logger.Info("Subscribed to Redis channel", "channel", s.config.RedisChannel, "attempt", attempt)
 
-	// Get the channel for receiving messages
-	ch := pubsub.Channel()
+		// Wait for confirmation that subscription is created
+		_, err := pubsub.Receive(ctx)
+		if err != nil {
+			s.logger.Error("Error receiving subscription confirmation", "error", err, "attempt", attempt)
+			pubsub.Close()
 
-	for {
-		select {
-		case <-ctx.Done():
-			s.logger.Info("Stopping Redis channel subscription")
-			return
-		case msg := <-ch:
-			if msg == nil {
-				s.logger.Warn("Received nil message from channel")
+			// Check if context is done
+			if ctx.Err() != nil {
+				return
+			}
+
+			// Retry with exponential backoff
+			if attempt < maxRetries {
+				s.logger.Info("Retrying subscription", "after", retryDelay)
+				time.Sleep(retryDelay)
+				retryDelay *= 2
 				continue
 			}
-			if err := s.handleIncomingMessage(ctx, msg.Payload); err != nil {
-				s.logger.Error("Error handling incoming message", "error", err)
+
+			// Max retries exhausted
+			s.logger.Error("Failed to subscribe after maximum retries - Pub/Sub functionality disabled", "max_retries", maxRetries)
+			return
+		}
+
+		// Successfully subscribed, start processing messages
+		s.logger.Info("Successfully subscribed to Redis channel", "channel", s.config.RedisChannel)
+
+		// Get the channel for receiving messages
+		ch := pubsub.Channel()
+
+		for {
+			select {
+			case <-ctx.Done():
+				s.logger.Info("Stopping Redis channel subscription")
+				pubsub.Close()
+				return
+			case msg := <-ch:
+				if msg == nil {
+					s.logger.Warn("Received nil message from channel")
+					continue
+				}
+				if err := s.handleIncomingMessage(ctx, msg.Payload); err != nil {
+					s.logger.Error("Error handling incoming message", "error", err)
+				}
 			}
 		}
 	}
@@ -210,8 +236,20 @@ func (s *TimeBombService) subscribeToChannel(ctx context.Context) {
 func (s *TimeBombService) handleIncomingMessage(ctx context.Context, payload string) error {
 	var tbMsg TimeBombMessage
 	if err := json.Unmarshal([]byte(payload), &tbMsg); err != nil {
-		s.logger.Warn("Failed to unmarshal TimeBombMessage", "error", err, "payload", payload)
+		s.logger.Warn("Failed to unmarshal TimeBombMessage", "error", err)
 		return fmt.Errorf("failed to unmarshal TimeBombMessage: %w", err)
+	}
+
+	// Validate TTL
+	if tbMsg.TTL <= 0 {
+		s.logger.Warn("Invalid TTL value (must be positive)", "ttl", tbMsg.TTL)
+		return fmt.Errorf("TTL must be positive, got %d", tbMsg.TTL)
+	}
+
+	// Prevent integer overflow - max TTL is ~68 years in seconds
+	if tbMsg.TTL > 2147483647 {
+		s.logger.Warn("TTL value too large", "ttl", tbMsg.TTL)
+		return fmt.Errorf("TTL too large, max is 2147483647 seconds")
 	}
 
 	s.logger.Info("Received message from channel",
