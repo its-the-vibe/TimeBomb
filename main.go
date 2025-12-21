@@ -385,6 +385,12 @@ func (s *TimeBombService) processMessage(ctx context.Context, payload string) er
 
 	s.logger.Info("Processing expired message", "channel", msg.Channel, "ts", msg.TS)
 
+	// Remove from sorted set immediately to prevent duplicate processing
+	if err := s.redis.ZRem(ctx, s.config.RedisSortedSet, payload).Err(); err != nil {
+		s.logger.Error("Failed to remove message from redis", "error", err)
+		return fmt.Errorf("failed to remove message from redis: %w", err)
+	}
+
 	// Post bang reaction to Redis list for SlackLiner
 	reactionMsg := ReactionMessage{
 		Reaction: "bang",
@@ -406,12 +412,12 @@ func (s *TimeBombService) processMessage(ctx context.Context, payload string) er
 	}
 
 	// Asynchronously wait and delete message to avoid blocking the processing loop
-	go s.deleteMessageAfterDelay(ctx, msg, payload)
+	go s.deleteMessageAfterDelay(ctx, msg)
 
 	return nil
 }
 
-func (s *TimeBombService) deleteMessageAfterDelay(ctx context.Context, msg Message, payload string) {
+func (s *TimeBombService) deleteMessageAfterDelay(ctx context.Context, msg Message) {
 	// Wait 1 second before deleting (with context awareness for graceful shutdown)
 	timer := time.NewTimer(1 * time.Second)
 	select {
@@ -431,28 +437,22 @@ func (s *TimeBombService) deleteMessageAfterDelay(ctx context.Context, msg Messa
 		// Check if it's a permanent error (message not found, channel not found, etc.)
 		slackErr, ok := err.(slack.SlackErrorResponse)
 		if ok && (slackErr.Err == "message_not_found" || slackErr.Err == "channel_not_found" || slackErr.Err == "not_in_channel") {
-			// Permanent error - remove from Redis
-			s.logger.Warn("Message cannot be deleted (permanent error), removing from queue",
-				"error", slackErr.Err)
-			if removeErr := s.redis.ZRem(ctx, s.config.RedisSortedSet, payload).Err(); removeErr != nil {
-				s.logger.Error("Error removing message from redis", "error", removeErr)
-			}
+			// Permanent error - log but message already removed from queue
+			s.logger.Warn("Message cannot be deleted (permanent error)",
+				"error", slackErr.Err,
+				"channel", msg.Channel,
+				"ts", msg.TS)
 			return
 		}
-		// Transient error - leave in Redis for retry
-		s.logger.Error("Failed to delete slack message (will retry)", "error", err)
+		// Transient error - message already removed from queue, so it won't retry
+		s.logger.Error("Failed to delete slack message (message already removed from queue, cannot retry)",
+			"error", err,
+			"channel", msg.Channel,
+			"ts", msg.TS)
 		return
 	}
 
 	s.logger.Info("Successfully deleted message", "channel", msg.Channel, "ts", msg.TS)
-
-	// Remove the message from Redis
-	if err := s.redis.ZRem(ctx, s.config.RedisSortedSet, payload).Err(); err != nil {
-		s.logger.Error("Failed to remove message from redis", "error", err)
-		return
-	}
-
-	s.logger.Debug("Removed message from Redis sorted set")
 }
 
 func (s *TimeBombService) Close() error {
