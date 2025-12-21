@@ -16,10 +16,24 @@ import (
 	"github.com/slack-go/slack"
 )
 
-// Message represents the structure of a message in Redis
+const (
+	// MaxTTL is the maximum allowed TTL in seconds (~68 years)
+	// Using math.MaxInt32 ensures no overflow when converting to time.Duration
+	// (time.Duration max is ~292 years, so 68 years is well within limits)
+	MaxTTL = 2147483647 // math.MaxInt32
+)
+
+// Message represents the structure of a message in Redis sorted set (internal use)
 type Message struct {
 	Channel string `json:"channel"`
 	TS      string `json:"ts"`
+}
+
+// TimeBombMessage represents the structure of messages received via Redis Pub/Sub
+type TimeBombMessage struct {
+	Channel string `json:"channel"`
+	TS      string `json:"ts"`
+	TTL     int    `json:"ttl"`
 }
 
 // Config holds the application configuration
@@ -28,6 +42,7 @@ type Config struct {
 	RedisPassword  string
 	RedisDB        int
 	RedisSortedSet string
+	RedisChannel   string
 	SlackBotToken  string
 	PollInterval   time.Duration
 	LogLevel       slog.Level
@@ -51,6 +66,7 @@ func loadConfig() (*Config, error) {
 		RedisPassword:  getEnv("REDIS_PASSWORD", ""),
 		RedisDB:        redisDB,
 		RedisSortedSet: getEnv("REDIS_SORTED_SET", "delays"),
+		RedisChannel:   getEnv("REDIS_CHANNEL", "timebomb-messages"),
 		SlackBotToken:  getEnv("SLACK_BOT_TOKEN", ""),
 		PollInterval:   pollInterval,
 		LogLevel:       logLevel,
@@ -122,7 +138,11 @@ func (s *TimeBombService) Start(ctx context.Context) error {
 	s.logger.Info("TimeBomb service started successfully")
 	s.logger.Info("Configuration",
 		"poll_interval", s.config.PollInterval,
-		"redis_sorted_set", s.config.RedisSortedSet)
+		"redis_sorted_set", s.config.RedisSortedSet,
+		"redis_channel", s.config.RedisChannel)
+
+	// Start Redis Pub/Sub subscriber in a separate goroutine
+	go s.subscribeToChannel(ctx)
 
 	ticker := time.NewTicker(s.config.PollInterval)
 	defer ticker.Stop()
@@ -157,6 +177,145 @@ func (s *TimeBombService) testConnections(ctx context.Context) error {
 		return fmt.Errorf("slack authentication failed: %w", err)
 	}
 	s.logger.Info("Slack authentication successful")
+
+	return nil
+}
+
+func (s *TimeBombService) subscribeToChannel(ctx context.Context) {
+	retryDelay := 5 * time.Second
+	const maxRetryDelay = 60 * time.Second
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		pubsub := s.redis.Subscribe(ctx, s.config.RedisChannel)
+
+		s.logger.Info("Attempting to subscribe to Redis channel", "channel", s.config.RedisChannel)
+
+		// Wait for confirmation that subscription is created
+		_, err := pubsub.Receive(ctx)
+		if err != nil {
+			s.logger.Error("Error receiving subscription confirmation", "error", err)
+			pubsub.Close()
+
+			// Check if context is done
+			if ctx.Err() != nil {
+				return
+			}
+
+			// Retry with exponential backoff (capped at maxRetryDelay)
+			s.logger.Info("Retrying subscription", "after", retryDelay)
+			time.Sleep(retryDelay)
+			retryDelay *= 2
+			if retryDelay > maxRetryDelay {
+				retryDelay = maxRetryDelay
+			}
+			continue
+		}
+
+		// Successfully subscribed, start processing messages
+		s.logger.Info("Successfully subscribed to Redis channel", "channel", s.config.RedisChannel)
+		// Reset retry delay after successful connection
+		retryDelay = 5 * time.Second
+
+		// Get the channel for receiving messages
+		ch := pubsub.Channel()
+
+		// Process messages until context is done or channel closes
+		channelClosed := false
+		for !channelClosed {
+			select {
+			case <-ctx.Done():
+				s.logger.Info("Stopping Redis channel subscription")
+				pubsub.Close()
+				return
+			case msg, ok := <-ch:
+				if !ok {
+					// Channel closed - connection lost
+					s.logger.Warn("Redis Pub/Sub channel closed unexpectedly, will attempt to reconnect")
+					channelClosed = true
+					break
+				}
+				if msg == nil {
+					s.logger.Warn("Received nil message from channel")
+					continue
+				}
+				if err := s.handleIncomingMessage(ctx, msg.Payload); err != nil {
+					s.logger.Error("Error handling incoming message", "error", err)
+				}
+			}
+		}
+
+		// Close pubsub and retry connection
+		pubsub.Close()
+	}
+}
+
+func (s *TimeBombService) handleIncomingMessage(ctx context.Context, payload string) error {
+	var tbMsg TimeBombMessage
+	if err := json.Unmarshal([]byte(payload), &tbMsg); err != nil {
+		s.logger.Warn("Failed to unmarshal TimeBombMessage", "error", err)
+		return fmt.Errorf("failed to unmarshal TimeBombMessage: %w", err)
+	}
+
+	// Validate required fields
+	if tbMsg.Channel == "" {
+		s.logger.Warn("Missing required field: channel")
+		return fmt.Errorf("channel field is required")
+	}
+	if tbMsg.TS == "" {
+		s.logger.Warn("Missing required field: ts")
+		return fmt.Errorf("ts field is required")
+	}
+
+	// Validate TTL
+	if tbMsg.TTL <= 0 {
+		s.logger.Warn("Invalid TTL value (must be positive)", "ttl", tbMsg.TTL)
+		return fmt.Errorf("TTL must be positive, got %d", tbMsg.TTL)
+	}
+
+	// Prevent integer overflow - max TTL is ~68 years in seconds
+	if tbMsg.TTL > MaxTTL {
+		s.logger.Warn("TTL value too large", "ttl", tbMsg.TTL)
+		return fmt.Errorf("TTL too large, max is %d seconds", MaxTTL)
+	}
+
+	s.logger.Info("Received message from channel",
+		"channel", tbMsg.Channel,
+		"ts", tbMsg.TS,
+		"ttl", tbMsg.TTL)
+
+	// Calculate expiration timestamp using time.Add to avoid overflow
+	now := time.Now()
+	expirationTime := now.Add(time.Duration(tbMsg.TTL) * time.Second).Unix()
+
+	// Create internal message format for sorted set
+	internalMsg := Message{
+		Channel: tbMsg.Channel,
+		TS:      tbMsg.TS,
+	}
+
+	// Marshal internal message to JSON
+	msgJSON, err := json.Marshal(internalMsg)
+	if err != nil {
+		s.logger.Error("Failed to marshal internal message", "error", err)
+		return fmt.Errorf("failed to marshal internal message: %w", err)
+	}
+
+	// Add to sorted set with expiration time as score
+	if err := s.redis.ZAdd(ctx, s.config.RedisSortedSet, redis.Z{
+		Score:  float64(expirationTime),
+		Member: string(msgJSON),
+	}).Err(); err != nil {
+		s.logger.Error("Failed to add message to sorted set", "error", err)
+		return fmt.Errorf("failed to add message to sorted set: %w", err)
+	}
+
+	s.logger.Debug("Added message to sorted set",
+		"sorted_set", s.config.RedisSortedSet,
+		"expiration_time", expirationTime)
 
 	return nil
 }
