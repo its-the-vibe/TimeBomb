@@ -397,7 +397,7 @@ func (s *TimeBombService) processMessage(ctx context.Context, payload string) er
 		s.logger.Error("Failed to marshal reaction message", "error", err)
 		// Continue with deletion even if reaction fails
 	} else {
-		if err := s.redis.RPush(ctx, s.config.RedisReactionList, string(reactionJSON)).Err(); err != nil {
+		if err := s.redis.RPush(ctx, s.config.RedisReactionList, reactionJSON).Err(); err != nil {
 			s.logger.Error("Failed to push reaction to Redis list", "error", err)
 			// Continue with deletion even if reaction fails
 		} else {
@@ -405,8 +405,16 @@ func (s *TimeBombService) processMessage(ctx context.Context, payload string) er
 		}
 	}
 
-	// Wait 1 second before deleting
-	time.Sleep(1 * time.Second)
+	// Wait 1 second before deleting (with context awareness for graceful shutdown)
+	timer := time.NewTimer(1 * time.Second)
+	select {
+	case <-timer.C:
+		// Timer expired, continue with deletion
+	case <-ctx.Done():
+		timer.Stop()
+		s.logger.Info("Context cancelled during wait, skipping message deletion", "channel", msg.Channel, "ts", msg.TS)
+		return ctx.Err()
+	}
 
 	s.logger.Info("Deleting message", "channel", msg.Channel, "ts", msg.TS)
 
