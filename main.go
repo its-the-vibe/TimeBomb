@@ -29,6 +29,13 @@ type Message struct {
 	TS      string `json:"ts"`
 }
 
+// ReactionMessage represents the structure of a reaction message to be posted to SlackLiner
+type ReactionMessage struct {
+	Reaction string `json:"reaction"`
+	Channel  string `json:"channel"`
+	TS       string `json:"ts"`
+}
+
 // TimeBombMessage represents the structure of messages received via Redis Pub/Sub
 type TimeBombMessage struct {
 	Channel string `json:"channel"`
@@ -38,14 +45,15 @@ type TimeBombMessage struct {
 
 // Config holds the application configuration
 type Config struct {
-	RedisAddr      string
-	RedisPassword  string
-	RedisDB        int
-	RedisSortedSet string
-	RedisChannel   string
-	SlackBotToken  string
-	PollInterval   time.Duration
-	LogLevel       slog.Level
+	RedisAddr         string
+	RedisPassword     string
+	RedisDB           int
+	RedisSortedSet    string
+	RedisChannel      string
+	RedisReactionList string
+	SlackBotToken     string
+	PollInterval      time.Duration
+	LogLevel          slog.Level
 }
 
 func loadConfig() (*Config, error) {
@@ -62,14 +70,15 @@ func loadConfig() (*Config, error) {
 	logLevel := parseLogLevel(getEnv("LOG_LEVEL", "info"))
 
 	return &Config{
-		RedisAddr:      getEnv("REDIS_ADDR", "localhost:6379"),
-		RedisPassword:  getEnv("REDIS_PASSWORD", ""),
-		RedisDB:        redisDB,
-		RedisSortedSet: getEnv("REDIS_SORTED_SET", "delays"),
-		RedisChannel:   getEnv("REDIS_CHANNEL", "timebomb-messages"),
-		SlackBotToken:  getEnv("SLACK_BOT_TOKEN", ""),
-		PollInterval:   pollInterval,
-		LogLevel:       logLevel,
+		RedisAddr:         getEnv("REDIS_ADDR", "localhost:6379"),
+		RedisPassword:     getEnv("REDIS_PASSWORD", ""),
+		RedisDB:           redisDB,
+		RedisSortedSet:    getEnv("REDIS_SORTED_SET", "delays"),
+		RedisChannel:      getEnv("REDIS_CHANNEL", "timebomb-messages"),
+		RedisReactionList: getEnv("REDIS_REACTION_LIST", "slack-reactions"),
+		SlackBotToken:     getEnv("SLACK_BOT_TOKEN", ""),
+		PollInterval:      pollInterval,
+		LogLevel:          logLevel,
 	}, nil
 }
 
@@ -374,10 +383,35 @@ func (s *TimeBombService) processMessage(ctx context.Context, payload string) er
 		return fmt.Errorf("failed to unmarshal message: %w", err)
 	}
 
+	s.logger.Info("Processing expired message", "channel", msg.Channel, "ts", msg.TS)
+
+	// Post bang reaction to Redis list for SlackLiner
+	reactionMsg := ReactionMessage{
+		Reaction: "bang",
+		Channel:  msg.Channel,
+		TS:       msg.TS,
+	}
+
+	reactionJSON, err := json.Marshal(reactionMsg)
+	if err != nil {
+		s.logger.Error("Failed to marshal reaction message", "error", err)
+		// Continue with deletion even if reaction fails
+	} else {
+		if err := s.redis.RPush(ctx, s.config.RedisReactionList, string(reactionJSON)).Err(); err != nil {
+			s.logger.Error("Failed to push reaction to Redis list", "error", err)
+			// Continue with deletion even if reaction fails
+		} else {
+			s.logger.Info("Posted bang reaction", "channel", msg.Channel, "ts", msg.TS)
+		}
+	}
+
+	// Wait 1 second before deleting
+	time.Sleep(1 * time.Second)
+
 	s.logger.Info("Deleting message", "channel", msg.Channel, "ts", msg.TS)
 
 	// Delete the message from Slack
-	_, _, err := s.slack.DeleteMessageContext(ctx, msg.Channel, msg.TS)
+	_, _, err = s.slack.DeleteMessageContext(ctx, msg.Channel, msg.TS)
 	if err != nil {
 		// Check if it's a permanent error (message not found, channel not found, etc.)
 		slackErr, ok := err.(slack.SlackErrorResponse)
