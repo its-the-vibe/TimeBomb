@@ -431,6 +431,12 @@ func (s *TimeBombService) deleteMessageAfterDelay(ctx context.Context, msg Messa
 
 	s.logger.Info("Deleting message", "channel", msg.Channel, "ts", msg.TS)
 
+	// First, check and delete any replies to this message
+	if err := s.deleteMessageReplies(ctx, msg.Channel, msg.TS); err != nil {
+		s.logger.Error("Failed to delete message replies", "error", err, "channel", msg.Channel, "ts", msg.TS)
+		// Continue with parent message deletion even if replies deletion fails
+	}
+
 	// Delete the message from Slack
 	_, _, err := s.slack.DeleteMessageContext(ctx, msg.Channel, msg.TS)
 	if err != nil {
@@ -453,6 +459,75 @@ func (s *TimeBombService) deleteMessageAfterDelay(ctx context.Context, msg Messa
 	}
 
 	s.logger.Info("Successfully deleted message", "channel", msg.Channel, "ts", msg.TS)
+}
+
+// deleteMessageReplies fetches and deletes all replies to a message
+func (s *TimeBombService) deleteMessageReplies(ctx context.Context, channel, ts string) error {
+	// Fetch all replies to the message
+	params := &slack.GetConversationRepliesParameters{
+		ChannelID: channel,
+		Timestamp: ts,
+		Limit:     1000, // Maximum limit per request
+	}
+
+	allReplies := []slack.Message{}
+	cursor := ""
+
+	// Paginate through all replies
+	for {
+		params.Cursor = cursor
+		msgs, hasMore, nextCursor, err := s.slack.GetConversationRepliesContext(ctx, params)
+		if err != nil {
+			// Check if it's a permanent error
+			slackErr, ok := err.(slack.SlackErrorResponse)
+			if ok && (slackErr.Err == "thread_not_found" || slackErr.Err == "message_not_found" || slackErr.Err == "channel_not_found") {
+				// Thread doesn't exist or message not found - nothing to delete
+				s.logger.Debug("No replies found or thread doesn't exist", "channel", channel, "ts", ts)
+				return nil
+			}
+			return fmt.Errorf("failed to get conversation replies: %w", err)
+		}
+
+		allReplies = append(allReplies, msgs...)
+
+		if !hasMore {
+			break
+		}
+		cursor = nextCursor
+	}
+
+	// The first message in the reply list is the parent message itself
+	// We skip it and only delete the actual replies
+	replyCount := 0
+	for _, reply := range allReplies {
+		// Skip the parent message (its timestamp matches the thread timestamp)
+		if reply.Timestamp == ts {
+			continue
+		}
+
+		s.logger.Debug("Deleting reply", "channel", channel, "ts", reply.Timestamp, "thread_ts", ts)
+
+		_, _, err := s.slack.DeleteMessageContext(ctx, channel, reply.Timestamp)
+		if err != nil {
+			// Log error but continue deleting other replies
+			slackErr, ok := err.(slack.SlackErrorResponse)
+			if ok && (slackErr.Err == "message_not_found" || slackErr.Err == "channel_not_found") {
+				s.logger.Warn("Reply message not found, skipping", "channel", channel, "ts", reply.Timestamp)
+				continue
+			}
+			s.logger.Error("Failed to delete reply", "error", err, "channel", channel, "ts", reply.Timestamp)
+			continue
+		}
+
+		replyCount++
+		s.logger.Debug("Successfully deleted reply", "channel", channel, "ts", reply.Timestamp)
+	}
+
+	if replyCount > 0 {
+		s.logger.Info("Deleted message replies", "count", replyCount, "channel", channel, "parent_ts", ts)
+	}
+
+	return nil
 }
 
 func (s *TimeBombService) Close() error {
