@@ -479,7 +479,7 @@ func (s *TimeBombService) deleteMessageReplies(ctx context.Context, channel, ts 
 		Limit:     MaxRepliesPerRequest,
 	}
 
-	allReplies := make([]slack.Message, 0)
+	allReplies := make([]slack.Message, 0, MaxRepliesPerRequest)
 	cursor := ""
 
 	// Paginate through all replies
