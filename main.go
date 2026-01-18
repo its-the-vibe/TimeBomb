@@ -23,6 +23,7 @@ const (
 	MaxTTL = 2147483647 // math.MaxInt32
 
 	// MaxRepliesPerRequest is the maximum number of replies to fetch per API request
+	// This is Slack's API limit for the conversations.replies endpoint
 	MaxRepliesPerRequest = 1000
 
 	// Slack API error constants
@@ -507,6 +508,8 @@ func (s *TimeBombService) deleteMessageReplies(ctx context.Context, channel, ts 
 
 	// The first message in the reply list is the parent message itself
 	// We skip it and only delete the actual replies
+	// (The Slack API includes the parent when fetching conversation replies,
+	// and we can identify it by comparing its timestamp to the thread timestamp)
 	replyCount := 0
 	for _, reply := range allReplies {
 		// Skip the parent message (its timestamp matches the thread timestamp)
