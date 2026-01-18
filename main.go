@@ -77,9 +77,12 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("invalid REDIS_DB: %w", err)
 	}
 
-	maxReplies, err := strconv.Atoi(getEnv("MAX_REPLIES", fmt.Sprintf("%d", DefaultMaxReplies)))
+	maxReplies, err := strconv.Atoi(getEnv("MAX_REPLIES", strconv.Itoa(DefaultMaxReplies)))
 	if err != nil {
 		return nil, fmt.Errorf("invalid MAX_REPLIES: %w", err)
+	}
+	if maxReplies <= 0 {
+		return nil, fmt.Errorf("MAX_REPLIES must be positive, got %d", maxReplies)
 	}
 
 	logLevel := parseLogLevel(getEnv("LOG_LEVEL", "info"))
