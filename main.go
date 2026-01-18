@@ -21,6 +21,15 @@ const (
 	// Using math.MaxInt32 ensures no overflow when converting to time.Duration
 	// (time.Duration max is ~292 years, so 68 years is well within limits)
 	MaxTTL = 2147483647 // math.MaxInt32
+
+	// MaxRepliesPerRequest is the maximum number of replies to fetch per API request
+	MaxRepliesPerRequest = 1000
+
+	// Slack API error constants
+	slackErrMessageNotFound = "message_not_found"
+	slackErrChannelNotFound = "channel_not_found"
+	slackErrThreadNotFound  = "thread_not_found"
+	slackErrNotInChannel    = "not_in_channel"
 )
 
 // Message represents the structure of a message in Redis sorted set (internal use)
@@ -442,7 +451,7 @@ func (s *TimeBombService) deleteMessageAfterDelay(ctx context.Context, msg Messa
 	if err != nil {
 		// Check if it's a permanent error (message not found, channel not found, etc.)
 		slackErr, ok := err.(slack.SlackErrorResponse)
-		if ok && (slackErr.Err == "message_not_found" || slackErr.Err == "channel_not_found" || slackErr.Err == "not_in_channel") {
+		if ok && (slackErr.Err == slackErrMessageNotFound || slackErr.Err == slackErrChannelNotFound || slackErr.Err == slackErrNotInChannel) {
 			// Permanent error - log but message already removed from queue
 			s.logger.Warn("Message cannot be deleted (permanent error)",
 				"error", slackErr.Err,
@@ -467,10 +476,10 @@ func (s *TimeBombService) deleteMessageReplies(ctx context.Context, channel, ts 
 	params := &slack.GetConversationRepliesParameters{
 		ChannelID: channel,
 		Timestamp: ts,
-		Limit:     1000, // Maximum limit per request
+		Limit:     MaxRepliesPerRequest,
 	}
 
-	allReplies := []slack.Message{}
+	allReplies := make([]slack.Message, 0)
 	cursor := ""
 
 	// Paginate through all replies
@@ -480,7 +489,7 @@ func (s *TimeBombService) deleteMessageReplies(ctx context.Context, channel, ts 
 		if err != nil {
 			// Check if it's a permanent error
 			slackErr, ok := err.(slack.SlackErrorResponse)
-			if ok && (slackErr.Err == "thread_not_found" || slackErr.Err == "message_not_found" || slackErr.Err == "channel_not_found") {
+			if ok && (slackErr.Err == slackErrThreadNotFound || slackErr.Err == slackErrMessageNotFound || slackErr.Err == slackErrChannelNotFound) {
 				// Thread doesn't exist or message not found - nothing to delete
 				s.logger.Debug("No replies found or thread doesn't exist", "channel", channel, "ts", ts)
 				return nil
@@ -511,7 +520,7 @@ func (s *TimeBombService) deleteMessageReplies(ctx context.Context, channel, ts 
 		if err != nil {
 			// Log error but continue deleting other replies
 			slackErr, ok := err.(slack.SlackErrorResponse)
-			if ok && (slackErr.Err == "message_not_found" || slackErr.Err == "channel_not_found") {
+			if ok && (slackErr.Err == slackErrMessageNotFound || slackErr.Err == slackErrChannelNotFound) {
 				s.logger.Warn("Reply message not found, skipping", "channel", channel, "ts", reply.Timestamp)
 				continue
 			}
