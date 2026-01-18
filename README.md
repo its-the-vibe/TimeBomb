@@ -41,6 +41,7 @@ The service is configured using environment variables:
 - `REDIS_CHANNEL`: Redis Pub/Sub channel for incoming messages (default: `timebomb-messages`)
 - `POLL_INTERVAL`: How often to poll for expired messages (default: `10s`)
 - `LOG_LEVEL`: Logging level - `debug`, `info`, `warn`, or `error` (default: `info`)
+- `MAX_REPLIES`: Maximum number of thread replies to delete per message (default: `100`)
 
 ## Message Format
 

@@ -21,6 +21,18 @@ const (
 	// Using math.MaxInt32 ensures no overflow when converting to time.Duration
 	// (time.Duration max is ~292 years, so 68 years is well within limits)
 	MaxTTL = 2147483647 // math.MaxInt32
+
+	// DefaultMaxReplies is the default maximum number of replies to delete per message
+	DefaultMaxReplies = 100
+
+	// SlackMaxRepliesLimit is Slack's API limit for the conversations.replies endpoint
+	SlackMaxRepliesLimit = 1000
+
+	// Slack API error constants
+	slackErrMessageNotFound = "message_not_found"
+	slackErrChannelNotFound = "channel_not_found"
+	slackErrThreadNotFound  = "thread_not_found"
+	slackErrNotInChannel    = "not_in_channel"
 )
 
 // Message represents the structure of a message in Redis sorted set (internal use)
@@ -54,6 +66,7 @@ type Config struct {
 	SlackBotToken     string
 	PollInterval      time.Duration
 	LogLevel          slog.Level
+	MaxReplies        int
 }
 
 func loadConfig() (*Config, error) {
@@ -65,6 +78,17 @@ func loadConfig() (*Config, error) {
 	redisDB, err := strconv.Atoi(getEnv("REDIS_DB", "0"))
 	if err != nil {
 		return nil, fmt.Errorf("invalid REDIS_DB: %w", err)
+	}
+
+	maxReplies, err := strconv.Atoi(getEnv("MAX_REPLIES", strconv.Itoa(DefaultMaxReplies)))
+	if err != nil {
+		return nil, fmt.Errorf("invalid MAX_REPLIES: %w", err)
+	}
+	if maxReplies <= 0 {
+		return nil, fmt.Errorf("MAX_REPLIES must be positive, got %d", maxReplies)
+	}
+	if maxReplies > SlackMaxRepliesLimit {
+		return nil, fmt.Errorf("MAX_REPLIES cannot exceed Slack API limit of %d, got %d", SlackMaxRepliesLimit, maxReplies)
 	}
 
 	logLevel := parseLogLevel(getEnv("LOG_LEVEL", "info"))
@@ -79,6 +103,7 @@ func loadConfig() (*Config, error) {
 		SlackBotToken:     getEnv("SLACK_BOT_TOKEN", ""),
 		PollInterval:      pollInterval,
 		LogLevel:          logLevel,
+		MaxReplies:        maxReplies,
 	}, nil
 }
 
@@ -431,12 +456,18 @@ func (s *TimeBombService) deleteMessageAfterDelay(ctx context.Context, msg Messa
 
 	s.logger.Info("Deleting message", "channel", msg.Channel, "ts", msg.TS)
 
+	// First, check and delete any replies to this message
+	if err := s.deleteMessageReplies(ctx, msg.Channel, msg.TS); err != nil {
+		s.logger.Error("Failed to delete message replies", "error", err, "channel", msg.Channel, "ts", msg.TS)
+		// Continue with parent message deletion even if replies deletion fails
+	}
+
 	// Delete the message from Slack
 	_, _, err := s.slack.DeleteMessageContext(ctx, msg.Channel, msg.TS)
 	if err != nil {
 		// Check if it's a permanent error (message not found, channel not found, etc.)
 		slackErr, ok := err.(slack.SlackErrorResponse)
-		if ok && (slackErr.Err == "message_not_found" || slackErr.Err == "channel_not_found" || slackErr.Err == "not_in_channel") {
+		if ok && (slackErr.Err == slackErrMessageNotFound || slackErr.Err == slackErrChannelNotFound || slackErr.Err == slackErrNotInChannel) {
 			// Permanent error - log but message already removed from queue
 			s.logger.Warn("Message cannot be deleted (permanent error)",
 				"error", slackErr.Err,
@@ -453,6 +484,71 @@ func (s *TimeBombService) deleteMessageAfterDelay(ctx context.Context, msg Messa
 	}
 
 	s.logger.Info("Successfully deleted message", "channel", msg.Channel, "ts", msg.TS)
+}
+
+// deleteMessageReplies fetches and deletes all replies to a message
+func (s *TimeBombService) deleteMessageReplies(ctx context.Context, channel, ts string) error {
+	// Fetch replies to the message (up to configured limit)
+	params := &slack.GetConversationRepliesParameters{
+		ChannelID: channel,
+		Timestamp: ts,
+		Limit:     s.config.MaxReplies,
+	}
+
+	msgs, _, _, err := s.slack.GetConversationRepliesContext(ctx, params)
+	if err != nil {
+		// Check if it's a permanent error
+		slackErr, ok := err.(slack.SlackErrorResponse)
+		if ok && (slackErr.Err == slackErrThreadNotFound || slackErr.Err == slackErrMessageNotFound || slackErr.Err == slackErrChannelNotFound) {
+			// Thread doesn't exist or message not found - nothing to delete
+			s.logger.Debug("No replies found or thread doesn't exist", "channel", channel, "ts", ts)
+			return nil
+		}
+		return fmt.Errorf("failed to get conversation replies: %w", err)
+	}
+
+	// Warn if we hit the configured limit, as there may be more replies
+	if len(msgs) == s.config.MaxReplies {
+		s.logger.Warn("Retrieved maximum configured replies, thread may have additional replies that won't be deleted",
+			"limit", s.config.MaxReplies,
+			"channel", channel,
+			"parent_ts", ts)
+	}
+
+	// The first message in the reply list is the parent message itself
+	// We skip it and only delete the actual replies
+	// (The Slack API includes the parent when fetching conversation replies,
+	// and we can identify it by comparing its timestamp to the thread timestamp)
+	replyCount := 0
+	for _, reply := range msgs {
+		// Skip the parent message (its timestamp matches the thread timestamp)
+		if reply.Timestamp == ts {
+			continue
+		}
+
+		s.logger.Debug("Deleting reply", "channel", channel, "ts", reply.Timestamp, "thread_ts", ts)
+
+		_, _, err := s.slack.DeleteMessageContext(ctx, channel, reply.Timestamp)
+		if err != nil {
+			// Log error but continue deleting other replies
+			slackErr, ok := err.(slack.SlackErrorResponse)
+			if ok && (slackErr.Err == slackErrMessageNotFound || slackErr.Err == slackErrChannelNotFound || slackErr.Err == slackErrNotInChannel) {
+				s.logger.Warn("Reply message not found, skipping", "channel", channel, "ts", reply.Timestamp)
+				continue
+			}
+			s.logger.Error("Failed to delete reply", "error", err, "channel", channel, "ts", reply.Timestamp)
+			continue
+		}
+
+		replyCount++
+		s.logger.Debug("Successfully deleted reply", "channel", channel, "ts", reply.Timestamp)
+	}
+
+	if replyCount > 0 {
+		s.logger.Info("Deleted message replies", "count", replyCount, "channel", channel, "parent_ts", ts)
+	}
+
+	return nil
 }
 
 func (s *TimeBombService) Close() error {
