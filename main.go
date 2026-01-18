@@ -520,7 +520,7 @@ func (s *TimeBombService) deleteMessageReplies(ctx context.Context, channel, ts 
 		if err != nil {
 			// Log error but continue deleting other replies
 			slackErr, ok := err.(slack.SlackErrorResponse)
-			if ok && (slackErr.Err == slackErrMessageNotFound || slackErr.Err == slackErrChannelNotFound) {
+			if ok && (slackErr.Err == slackErrMessageNotFound || slackErr.Err == slackErrChannelNotFound || slackErr.Err == slackErrNotInChannel) {
 				s.logger.Warn("Reply message not found, skipping", "channel", channel, "ts", reply.Timestamp)
 				continue
 			}
