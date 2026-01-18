@@ -25,6 +25,9 @@ const (
 	// DefaultMaxReplies is the default maximum number of replies to delete per message
 	DefaultMaxReplies = 100
 
+	// SlackMaxRepliesLimit is Slack's API limit for the conversations.replies endpoint
+	SlackMaxRepliesLimit = 1000
+
 	// Slack API error constants
 	slackErrMessageNotFound = "message_not_found"
 	slackErrChannelNotFound = "channel_not_found"
@@ -83,6 +86,9 @@ func loadConfig() (*Config, error) {
 	}
 	if maxReplies <= 0 {
 		return nil, fmt.Errorf("MAX_REPLIES must be positive, got %d", maxReplies)
+	}
+	if maxReplies > SlackMaxRepliesLimit {
+		return nil, fmt.Errorf("MAX_REPLIES cannot exceed Slack API limit of %d, got %d", SlackMaxRepliesLimit, maxReplies)
 	}
 
 	logLevel := parseLogLevel(getEnv("LOG_LEVEL", "info"))
@@ -499,6 +505,14 @@ func (s *TimeBombService) deleteMessageReplies(ctx context.Context, channel, ts 
 			return nil
 		}
 		return fmt.Errorf("failed to get conversation replies: %w", err)
+	}
+
+	// Warn if we hit the configured limit, as there may be more replies
+	if len(msgs) == s.config.MaxReplies {
+		s.logger.Warn("Retrieved maximum configured replies, thread may have additional replies that won't be deleted",
+			"limit", s.config.MaxReplies,
+			"channel", channel,
+			"parent_ts", ts)
 	}
 
 	// The first message in the reply list is the parent message itself
