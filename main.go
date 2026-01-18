@@ -22,9 +22,8 @@ const (
 	// (time.Duration max is ~292 years, so 68 years is well within limits)
 	MaxTTL = 2147483647 // math.MaxInt32
 
-	// MaxRepliesPerRequest is the maximum number of replies to fetch per API request
-	// This is Slack's API limit for the conversations.replies endpoint
-	MaxRepliesPerRequest = 1000
+	// DefaultMaxReplies is the default maximum number of replies to delete per message
+	DefaultMaxReplies = 100
 
 	// Slack API error constants
 	slackErrMessageNotFound = "message_not_found"
@@ -64,6 +63,7 @@ type Config struct {
 	SlackBotToken     string
 	PollInterval      time.Duration
 	LogLevel          slog.Level
+	MaxReplies        int
 }
 
 func loadConfig() (*Config, error) {
@@ -75,6 +75,11 @@ func loadConfig() (*Config, error) {
 	redisDB, err := strconv.Atoi(getEnv("REDIS_DB", "0"))
 	if err != nil {
 		return nil, fmt.Errorf("invalid REDIS_DB: %w", err)
+	}
+
+	maxReplies, err := strconv.Atoi(getEnv("MAX_REPLIES", fmt.Sprintf("%d", DefaultMaxReplies)))
+	if err != nil {
+		return nil, fmt.Errorf("invalid MAX_REPLIES: %w", err)
 	}
 
 	logLevel := parseLogLevel(getEnv("LOG_LEVEL", "info"))
@@ -89,6 +94,7 @@ func loadConfig() (*Config, error) {
 		SlackBotToken:     getEnv("SLACK_BOT_TOKEN", ""),
 		PollInterval:      pollInterval,
 		LogLevel:          logLevel,
+		MaxReplies:        maxReplies,
 	}, nil
 }
 
@@ -473,37 +479,23 @@ func (s *TimeBombService) deleteMessageAfterDelay(ctx context.Context, msg Messa
 
 // deleteMessageReplies fetches and deletes all replies to a message
 func (s *TimeBombService) deleteMessageReplies(ctx context.Context, channel, ts string) error {
-	// Fetch all replies to the message
+	// Fetch replies to the message (up to configured limit)
 	params := &slack.GetConversationRepliesParameters{
 		ChannelID: channel,
 		Timestamp: ts,
-		Limit:     MaxRepliesPerRequest,
+		Limit:     s.config.MaxReplies,
 	}
 
-	allReplies := make([]slack.Message, 0, MaxRepliesPerRequest)
-	cursor := ""
-
-	// Paginate through all replies
-	for {
-		params.Cursor = cursor
-		msgs, hasMore, nextCursor, err := s.slack.GetConversationRepliesContext(ctx, params)
-		if err != nil {
-			// Check if it's a permanent error
-			slackErr, ok := err.(slack.SlackErrorResponse)
-			if ok && (slackErr.Err == slackErrThreadNotFound || slackErr.Err == slackErrMessageNotFound || slackErr.Err == slackErrChannelNotFound) {
-				// Thread doesn't exist or message not found - nothing to delete
-				s.logger.Debug("No replies found or thread doesn't exist", "channel", channel, "ts", ts)
-				return nil
-			}
-			return fmt.Errorf("failed to get conversation replies: %w", err)
+	msgs, _, _, err := s.slack.GetConversationRepliesContext(ctx, params)
+	if err != nil {
+		// Check if it's a permanent error
+		slackErr, ok := err.(slack.SlackErrorResponse)
+		if ok && (slackErr.Err == slackErrThreadNotFound || slackErr.Err == slackErrMessageNotFound || slackErr.Err == slackErrChannelNotFound) {
+			// Thread doesn't exist or message not found - nothing to delete
+			s.logger.Debug("No replies found or thread doesn't exist", "channel", channel, "ts", ts)
+			return nil
 		}
-
-		allReplies = append(allReplies, msgs...)
-
-		if !hasMore {
-			break
-		}
-		cursor = nextCursor
+		return fmt.Errorf("failed to get conversation replies: %w", err)
 	}
 
 	// The first message in the reply list is the parent message itself
@@ -511,7 +503,7 @@ func (s *TimeBombService) deleteMessageReplies(ctx context.Context, channel, ts 
 	// (The Slack API includes the parent when fetching conversation replies,
 	// and we can identify it by comparing its timestamp to the thread timestamp)
 	replyCount := 0
-	for _, reply := range allReplies {
+	for _, reply := range msgs {
 		// Skip the parent message (its timestamp matches the thread timestamp)
 		if reply.Timestamp == ts {
 			continue
