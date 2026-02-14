@@ -18,4 +18,4 @@ services:
       
       # Service configuration
       - POLL_INTERVAL=${POLL_INTERVAL:-1s}
-    restart: unless-stopped
+    restart: on-failure:10
