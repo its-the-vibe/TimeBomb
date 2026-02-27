@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/redis/go-redis/v9 v9.18.0
-	github.com/slack-go/slack v0.17.3
+	github.com/slack-go/slack v0.18.0
 )
 
 require (
