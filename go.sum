@@ -26,6 +26,8 @@ github.com/slack-go/slack v0.21.0 h1:TAGnZYFp79LAG/oqFzYhFJ9LwEwXJ93heCkPvwjxc7o
 github.com/slack-go/slack v0.21.0/go.mod h1:K81UmCivcYd/5Jmz8vLBfuyoZ3B4rQC2GHVXHteXiAE=
 github.com/slack-go/slack v0.21.1 h1:vBHR+IkaXbv9RLY6w/RiN82D+5/OTI06CGqrlZ3Vyas=
 github.com/slack-go/slack v0.21.1/go.mod h1:K81UmCivcYd/5Jmz8vLBfuyoZ3B4rQC2GHVXHteXiAE=
+github.com/slack-go/slack v0.22.0 h1:jaUTiGoyhCl7xC/PuVh05BfM1ifVBsQQUKgsr5TLg5k=
+github.com/slack-go/slack v0.22.0/go.mod h1:K81UmCivcYd/5Jmz8vLBfuyoZ3B4rQC2GHVXHteXiAE=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/zeebo/xxh3 v1.0.2 h1:xZmwmqxHZA8AI603jOQ0tMqmBr9lPeFwGg6d+xy9DC0=
