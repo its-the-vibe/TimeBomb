@@ -287,6 +287,23 @@ func (s *TimeBombService) subscribeToChannel(ctx context.Context) {
 	}
 }
 
+// validateTimeBombMessage checks that all required fields are present and valid.
+func validateTimeBombMessage(msg *TimeBombMessage) error {
+	if msg.Channel == "" {
+		return fmt.Errorf("channel field is required")
+	}
+	if msg.TS == "" {
+		return fmt.Errorf("ts field is required")
+	}
+	if msg.TTL <= 0 {
+		return fmt.Errorf("TTL must be positive, got %d", msg.TTL)
+	}
+	if msg.TTL > MaxTTL {
+		return fmt.Errorf("TTL too large, max is %d seconds", MaxTTL)
+	}
+	return nil
+}
+
 func (s *TimeBombService) handleIncomingMessage(ctx context.Context, payload string) error {
 	var tbMsg TimeBombMessage
 	if err := json.Unmarshal([]byte(payload), &tbMsg); err != nil {
@@ -294,26 +311,9 @@ func (s *TimeBombService) handleIncomingMessage(ctx context.Context, payload str
 		return fmt.Errorf("failed to unmarshal TimeBombMessage: %w", err)
 	}
 
-	// Validate required fields
-	if tbMsg.Channel == "" {
-		s.logger.Warn("Missing required field: channel")
-		return fmt.Errorf("channel field is required")
-	}
-	if tbMsg.TS == "" {
-		s.logger.Warn("Missing required field: ts")
-		return fmt.Errorf("ts field is required")
-	}
-
-	// Validate TTL
-	if tbMsg.TTL <= 0 {
-		s.logger.Warn("Invalid TTL value (must be positive)", "ttl", tbMsg.TTL)
-		return fmt.Errorf("TTL must be positive, got %d", tbMsg.TTL)
-	}
-
-	// Prevent integer overflow - max TTL is ~68 years in seconds
-	if tbMsg.TTL > MaxTTL {
-		s.logger.Warn("TTL value too large", "ttl", tbMsg.TTL)
-		return fmt.Errorf("TTL too large, max is %d seconds", MaxTTL)
+	if err := validateTimeBombMessage(&tbMsg); err != nil {
+		s.logger.Warn("Invalid TimeBombMessage", "error", err)
+		return err
 	}
 
 	s.logger.Info("Received message from channel",

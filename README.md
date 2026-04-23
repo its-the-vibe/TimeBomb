@@ -1,5 +1,7 @@
 # TimeBomb
 
+[![CI](https://github.com/its-the-vibe/TimeBomb/actions/workflows/ci.yaml/badge.svg)](https://github.com/its-the-vibe/TimeBomb/actions/workflows/ci.yaml)
+
 Service which polls for expired slack messages and deletes them.
 
 ## Overview
