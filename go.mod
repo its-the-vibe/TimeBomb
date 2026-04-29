@@ -3,7 +3,7 @@ module github.com/its-the-vibe/TimeBomb
 go 1.26.2
 
 require (
-	github.com/redis/go-redis/v9 v9.18.0
+	github.com/redis/go-redis/v9 v9.19.0
 	github.com/slack-go/slack v0.23.0
 )
 
