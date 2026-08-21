@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: ghcr.io/its-the-vibe/timebomb:latest
+    pull_policy: always
     read_only: true
     extra_hosts:
       - "host.docker.internal:host-gateway"
