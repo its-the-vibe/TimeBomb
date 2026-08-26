@@ -1,8 +1,8 @@
 # Build stage
-FROM golang:1.27.0-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.0-alpine AS builder
 
-# Install ca-certificates
-RUN apk add --no-cache ca-certificates git
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /build
 
@@ -16,16 +16,15 @@ RUN go mod download
 COPY . .
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags '-extldflags "-static"' -o timebomb .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -installsuffix cgo -ldflags '-extldflags "-static"' -o timebomb .
 
 # Runtime stage
-FROM scratch
-
-# Copy CA certificates for HTTPS requests to Slack API
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+FROM gcr.io/distroless/static-debian13:nonroot
 
 # Copy the binary
 COPY --from=builder /build/timebomb /timebomb
+
+USER nonroot:nonroot
 
 # Run the binary
 ENTRYPOINT ["/timebomb"]
